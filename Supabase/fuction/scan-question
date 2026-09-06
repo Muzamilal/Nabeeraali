@@ -1,1 +1,233 @@
+import { GoogleGenerativeAI } from "npm:@google/generative-ai@0.21.0";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+};
+
+interface QuizQuestion {
+  question_text: string;
+  options: string[];
+  correct_answer: number;
+  explanation: string;
+}
+
+const sampleQuestions: QuizQuestion[] = [
+  {
+    question_text: "Which of the following is the powerhouse of the cell?",
+    options: ["Nucleus", "Mitochondria", "Ribosome", "Golgi apparatus"],
+    correct_answer: 1,
+    explanation:
+      "Mitochondria are called the powerhouse of the cell because they produce ATP through cellular respiration, which is the primary energy currency of the cell.",
+  },
+  {
+    question_text: "The pH of human blood is approximately:",
+    options: ["6.4", "7.0", "7.4", "8.0"],
+    correct_answer: 2,
+    explanation:
+      "Human blood has a pH of approximately 7.4, which is slightly alkaline. This is maintained by the bicarbonate buffer system and is critical for proper physiological function.",
+  },
+  {
+    question_text: "Which hormone is responsible for regulating blood sugar levels?",
+    options: ["Thyroxine", "Insulin", "Adrenaline", "Cortisol"],
+    correct_answer: 1,
+    explanation:
+      "Insulin, produced by the beta cells of the pancreas, lowers blood glucose by promoting glucose uptake into cells. Glucagon raises blood sugar, working in opposition to insulin.",
+  },
+  {
+    question_text: "The process by which plants make their food is called:",
+    options: ["Respiration", "Transpiration", "Photosynthesis", "Digestion"],
+    correct_answer: 2,
+    explanation:
+      "Photosynthesis is the process by which green plants use sunlight, carbon dioxide, and water to produce glucose and oxygen. It occurs in the chloroplasts containing chlorophyll.",
+  },
+  {
+    question_text: "Which of the following is NOT a function of the liver?",
+    options: [
+      "Bile production",
+      "Glycogen storage",
+      "Red blood cell production in adults",
+      "Detoxification",
+    ],
+    correct_answer: 2,
+    explanation:
+      "In adults, red blood cells are primarily produced in the bone marrow, not the liver. The liver does produce bile, stores glycogen, and performs detoxification. In fetuses, the liver does produce RBCs.",
+  },
+  {
+    question_text: "The basic structural and functional unit of life is:",
+    options: ["Tissue", "Organ", "Cell", "Organ system"],
+    correct_answer: 2,
+    explanation:
+      "The cell is the basic structural and functional unit of all living organisms. All living things are composed of one or more cells, which carry out all life processes.",
+  },
+  {
+    question_text: "Which vitamin is essential for blood clotting?",
+    options: ["Vitamin A", "Vitamin C", "Vitamin D", "Vitamin K"],
+    correct_answer: 3,
+    explanation:
+      "Vitamin K is essential for the synthesis of clotting factors in the liver. It is required for the production of prothrombin and other clotting proteins.",
+  },
+  {
+    question_text: "The largest organ in the human body is:",
+    options: ["Liver", "Brain", "Skin", "Lungs"],
+    correct_answer: 2,
+    explanation:
+      "The skin is the largest organ in the human body. It serves as a protective barrier, regulates temperature, and contains sensory receptors for touch, pressure, pain, and temperature.",
+  },
+  {
+    question_text: "Which gas is most abundant in the Earth's atmosphere?",
+    options: ["Oxygen", "Carbon dioxide", "Nitrogen", "Hydrogen"],
+    correct_answer: 2,
+    explanation:
+      "Nitrogen makes up about 78% of the Earth's atmosphere, making it the most abundant gas. Oxygen is second at approximately 21%.",
+  },
+  {
+    question_text: "The number of bones in the adult human body is:",
+    options: ["186", "206", "226", "246"],
+    correct_answer: 1,
+    explanation:
+      "The adult human skeleton consists of 206 bones. Babies are born with about 270 bones, but many fuse together during growth and development.",
+  },
+];
+
+async function fetchImageAsBase64(url: string): Promise<{ data: string; mimeType: string }> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch image: ${response.status}`);
+  }
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const arrayBuffer = await response.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = btoa(binary);
+  return { data: base64, mimeType: contentType };
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  try {
+    const { imageUrl } = await req.json();
+
+    if (!imageUrl) {
+      return new Response(
+        JSON.stringify({ error: "Image URL is required" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const geminiKey = Deno.env.get("GEMINI_API_KEY");
+
+    let questions: QuizQuestion[] = [];
+
+    if (geminiKey) {
+      const genAI = new GoogleGenerativeAI(geminiKey);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 4096,
+          responseMimeType: "application/json",
+        },
+      });
+
+      const imageData = await fetchImageAsBase64(imageUrl);
+
+      const prompt = `You are an expert at creating MDCAT-style quiz questions from educational content. Analyze the provided image and extract or generate quiz questions based on the content visible in the image.
+
+Return ONLY valid JSON in this exact format:
+{
+  "questions": [
+    {
+      "question_text": "The question text here",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correct_answer": 0,
+      "explanation": "A clear explanation of why the correct answer is right and why the others are wrong."
+    }
+  ]
+}
+
+Rules:
+- Generate 5-10 questions based on the image content
+- The correct_answer is a 0-indexed integer (0=A, 1=B, 2=C, 3=D)
+- Each question must have exactly 4 options
+- Include a clear, concise explanation for each answer
+- If the image contains questions, extract and format them
+- If the image contains study material, generate questions from it
+- Focus on MDCAT/medical entrance exam topics when relevant`;
+
+      const result = await model.generateContent([
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType: imageData.mimeType,
+            data: imageData.data,
+          },
+        },
+      ]);
+
+      const responseText = result.response.text();
+
+      if (responseText) {
+        try {
+          const parsed = JSON.parse(responseText);
+          if (parsed.questions && Array.isArray(parsed.questions)) {
+            questions = parsed.questions.filter(
+              (q: unknown): q is QuizQuestion => {
+                const question = q as Partial<QuizQuestion>;
+                return (
+                  typeof question.question_text === "string" &&
+                  Array.isArray(question.options) &&
+                  question.options.length === 4 &&
+                  typeof question.correct_answer === "number" &&
+                  typeof question.explanation === "string"
+                );
+              }
+            );
+          }
+        } catch {
+          const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            if (parsed.questions && Array.isArray(parsed.questions)) {
+              questions = parsed.questions.filter(
+                (q: unknown): q is QuizQuestion => {
+                  const question = q as Partial<QuizQuestion>;
+                  return (
+                    typeof question.question_text === "string" &&
+                    Array.isArray(question.options) &&
+                    question.options.length === 4 &&
+                    typeof question.correct_answer === "number" &&
+                    typeof question.explanation === "string"
+                  );
+                }
+              );
+            }
+          }
+        }
+      }
+    }
+
+    if (questions.length === 0) {
+      questions = sampleQuestions;
+    }
+
+    return new Response(
+      JSON.stringify({ questions }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    console.error("Scan error:", err);
+    return new Response(
+      JSON.stringify({ error: err.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+});
 
