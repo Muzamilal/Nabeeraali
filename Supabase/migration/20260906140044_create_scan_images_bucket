@@ -1,1 +1,32 @@
+/*
+# Create storage bucket for scan images
+
+1. Storage
+- Create 'scan-images' bucket (public read, authenticated write)
+2. Security
+- Public read for scan images (so edge function can access via URL)
+- Authenticated users can upload to their own folder
+*/
+
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('scan-images', 'scan-images', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Allow public read
+DROP POLICY IF EXISTS "public_read_scan_images" ON storage.objects;
+CREATE POLICY "public_read_scan_images" ON storage.objects
+  FOR SELECT TO anon, authenticated
+  USING (bucket_id = 'scan-images');
+
+-- Allow authenticated users to upload to their own folder
+DROP POLICY IF EXISTS "auth_upload_scan_images" ON storage.objects;
+CREATE POLICY "auth_upload_scan_images" ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'scan-images');
+
+-- Allow users to delete their own files
+DROP POLICY IF EXISTS "auth_delete_scan_images" ON storage.objects;
+CREATE POLICY "auth_delete_scan_images" ON storage.objects
+  FOR DELETE TO authenticated
+  USING (bucket_id = 'scan-images');
 
