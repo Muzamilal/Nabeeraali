@@ -1,1 +1,158 @@
+/*
+# Create Study Platform Schema
+
+1. New Tables
+- `profiles` — user profile data with gamification stats (points, streak, test counts, correct/incorrect stats)
+- `test_sessions` — record of each test attempt (mode, score, question count)
+- `test_questions` — individual question results within a test session
+- `leaderboard` — materialized view for leaderboard rankings
+
+2. Security
+- RLS enabled on all tables
+- Owner-scoped CRUD on profiles, test_sessions, test_questions (authenticated only)
+- Leaderboard view is public to authenticated users (read-only)
+- `handle_new_user` trigger auto-creates a profile on signup
+
+3. Important Notes
+- profiles.id is FK to auth.users(id) ON DELETE CASCADE
+- test_sessions.user_id defaults to auth.uid()
+- test_questions.session_id FK to test_sessions ON DELETE CASCADE
+*/
+
+-- Create profiles table
+CREATE TABLE IF NOT EXISTS profiles (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  username text NOT NULL DEFAULT '',
+  avatar_url text DEFAULT '',
+  total_points integer NOT NULL DEFAULT 0,
+  current_streak integer NOT NULL DEFAULT 0,
+  longest_streak integer NOT NULL DEFAULT 0,
+  tests_completed integer NOT NULL DEFAULT 0,
+  correct_answers integer NOT NULL DEFAULT 0,
+  incorrect_answers integer NOT NULL DEFAULT 0,
+  last_test_date date,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_own_profile" ON profiles;
+CREATE POLICY "select_own_profile" ON profiles FOR SELECT
+  TO authenticated USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "insert_own_profile" ON profiles;
+CREATE POLICY "insert_own_profile" ON profiles FOR INSERT
+  TO authenticated WITH CHECK (auth.uid() = id);
+
+DROP POLICY IF EXISTS "update_own_profile" ON profiles;
+CREATE POLICY "update_own_profile" ON profiles FOR UPDATE
+  TO authenticated USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
+
+-- Create test_sessions table
+CREATE TABLE IF NOT EXISTS test_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  mode text NOT NULL DEFAULT 'mcq',
+  score integer NOT NULL DEFAULT 0,
+  total_questions integer NOT NULL DEFAULT 0,
+  correct_count integer NOT NULL DEFAULT 0,
+  incorrect_count integer NOT NULL DEFAULT 0,
+  source_image_url text DEFAULT '',
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE test_sessions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_own_sessions" ON test_sessions;
+CREATE POLICY "select_own_sessions" ON test_sessions FOR SELECT
+  TO authenticated USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "insert_own_sessions" ON test_sessions;
+CREATE POLICY "insert_own_sessions" ON test_sessions FOR INSERT
+  TO authenticated WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "update_own_sessions" ON test_sessions;
+CREATE POLICY "update_own_sessions" ON test_sessions FOR UPDATE
+  TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "delete_own_sessions" ON test_sessions;
+CREATE POLICY "delete_own_sessions" ON test_sessions FOR DELETE
+  TO authenticated USING (auth.uid() = user_id);
+
+-- Create test_questions table
+CREATE TABLE IF NOT EXISTS test_questions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id uuid NOT NULL REFERENCES test_sessions(id) ON DELETE CASCADE,
+  question_text text NOT NULL,
+  options jsonb NOT NULL DEFAULT '[]',
+  correct_answer integer NOT NULL DEFAULT 0,
+  user_answer integer,
+  is_correct boolean NOT NULL DEFAULT false,
+  explanation text DEFAULT '',
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE test_questions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_own_questions" ON test_questions;
+CREATE POLICY "select_own_questions" ON test_questions FOR SELECT
+  TO authenticated USING (
+    EXISTS (SELECT 1 FROM test_sessions WHERE test_sessions.id = test_questions.session_id AND test_sessions.user_id = auth.uid())
+  );
+
+DROP POLICY IF EXISTS "insert_own_questions" ON test_questions;
+CREATE POLICY "insert_own_questions" ON test_questions FOR INSERT
+  TO authenticated WITH CHECK (
+    EXISTS (SELECT 1 FROM test_sessions WHERE test_sessions.id = test_questions.session_id AND test_sessions.user_id = auth.uid())
+  );
+
+DROP POLICY IF EXISTS "delete_own_questions" ON test_questions;
+CREATE POLICY "delete_own_questions" ON test_questions FOR DELETE
+  TO authenticated USING (
+    EXISTS (SELECT 1 FROM test_sessions WHERE test_sessions.id = test_questions.session_id AND test_sessions.user_id = auth.uid())
+  );
+
+-- Leaderboard view (aggregated from profiles)
+CREATE OR REPLACE VIEW leaderboard AS
+SELECT
+  p.id,
+  p.username,
+  p.avatar_url,
+  p.total_points,
+  p.current_streak,
+  p.longest_streak,
+  p.tests_completed,
+  p.correct_answers,
+  p.incorrect_answers,
+  RANK() OVER (ORDER BY p.total_points DESC) as rank
+FROM profiles p
+WHERE p.total_points > 0 OR p.tests_completed > 0;
+
+ALTER VIEW leaderboard OWNER TO postgres;
+GRANT SELECT ON leaderboard TO authenticated;
+
+-- Function to auto-create profile on signup
+CREATE OR REPLACE FUNCTION handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, username)
+  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data->>'username', split_part(NEW.email, '@', 1)));
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_test_sessions_user_id ON test_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_test_questions_session_id ON test_questions(session_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_total_points ON profiles(total_points DESC);
 
