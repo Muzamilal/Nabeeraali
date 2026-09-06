@@ -1,0 +1,2 @@
+[functions.scan-questions]
+verify_jwt = false
